@@ -9,6 +9,7 @@ import re
 import random
 import argparse
 import glob
+import fnmatch
 
 random.seed(42)
 
@@ -70,6 +71,157 @@ def build_uuid_to_filename_map(cocos_sprite_dir, prefix_module=False):
     return uuid_map
 
 
+def build_uuid_to_border_map(cocos_sprite_dir):
+    """Map Cocos sprite UUIDs to their nine-slice border (left, bottom, right, top).
+
+    Border values live on each Cocos `subMetas` entry alongside its uuid. Any
+    spriteFrame with a non-zero border is nine-slice and must be imported into
+    Unity as Sliced with a matching spriteBorder.
+    """
+    border_map = {}
+    for root, dirs, files in os.walk(cocos_sprite_dir):
+        for f in files:
+            if f.endswith('.meta'):
+                meta_path = os.path.join(root, f)
+                try:
+                    with open(meta_path, 'r') as mf:
+                        data = json.load(mf)
+                    for sprite_name, meta_info in data.get('subMetas', {}).items():
+                        if not isinstance(meta_info, dict) or 'uuid' not in meta_info:
+                            continue
+                        border = (
+                            meta_info.get('borderLeft', 0) or 0,
+                            meta_info.get('borderBottom', 0) or 0,
+                            meta_info.get('borderRight', 0) or 0,
+                            meta_info.get('borderTop', 0) or 0,
+                        )
+                        border_map[meta_info['uuid']] = border
+                except Exception:
+                    pass
+    return border_map
+
+
+def _format_border(left, bottom, right, top):
+    return "{x: %g, y: %g, z: %g, w: %g}" % (left, bottom, right, top)
+
+
+def _set_sprite_border_field(content, border):
+    """Set the TextureImporter-level `spriteBorder` line (Single sprite mode)."""
+    return re.sub(
+        r'(spriteBorder:\s*)\{x: [^}]*\}',
+        lambda m: m.group(1) + _format_border(*border),
+        content,
+        count=1,
+    )
+
+
+def _set_sprite_entry_border(content, sprite_name, border):
+    """Set the `border` of the spriteSheet entry named `sprite_name`."""
+    lines = content.splitlines(keepends=True)
+    in_entry = False
+    entry_name = None
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('- serializedVersion:'):
+            in_entry = True
+            entry_name = None
+            continue
+        if in_entry and entry_name is None:
+            m = re.match(r'\s*name:\s*(.*)', line)
+            if m:
+                entry_name = m.group(1).strip()
+            continue
+        if in_entry and entry_name == sprite_name:
+            m = re.match(r'(\s*border:\s*)\{x: [^}]*\}', line)
+            if m:
+                lines[i] = m.group(1) + _format_border(*border) + '\n'
+                return ''.join(lines)
+    return content
+
+
+def write_sprite_borders(cocos_sprite_dir, unity_textures_dir, prefix_module=False):
+    """Copy Cocos nine-slice borders into Unity texture importer .meta files.
+
+    Single-mode textures get their TextureImporter `spriteBorder` set; Multiple-mode
+    textures get each matching spriteSheet entry's `border` set. Returns the number
+    of Unity .meta files updated.
+    """
+    cocos_borders = {}
+    for root, dirs, files in os.walk(cocos_sprite_dir):
+        for f in files:
+            if not f.endswith('.meta'):
+                continue
+            meta_path = os.path.join(root, f)
+            try:
+                with open(meta_path, 'r') as mf:
+                    data = json.load(mf)
+            except Exception:
+                continue
+            sub_metas = data.get('subMetas', {})
+            if not sub_metas:
+                continue
+            orig_file = os.path.splitext(meta_path)[0]
+            filename = os.path.basename(orig_file)
+            if prefix_module:
+                relative = os.path.relpath(orig_file, cocos_sprite_dir)
+                relative_parts = relative.split(os.sep)
+                if "spine" not in (part.lower() for part in relative_parts[:-1]):
+                    filename = relative_parts[0] + "_" + filename
+            borders = {}
+            for sprite_name, meta_info in sub_metas.items():
+                if not isinstance(meta_info, dict):
+                    continue
+                border = (
+                    meta_info.get('borderLeft', 0) or 0,
+                    meta_info.get('borderBottom', 0) or 0,
+                    meta_info.get('borderRight', 0) or 0,
+                    meta_info.get('borderTop', 0) or 0,
+                )
+                if any(v != 0 for v in border):
+                    borders[sprite_name] = border
+            if borders:
+                cocos_borders[filename] = borders
+
+    if not cocos_borders:
+        return 0
+
+    unity_meta_paths = {}
+    for root, dirs, files in os.walk(unity_textures_dir):
+        for f in files:
+            if f.endswith('.meta'):
+                unity_meta_paths[os.path.splitext(f)[0]] = os.path.join(root, f)
+
+    updated = 0
+    for filename, borders in cocos_borders.items():
+        meta_path = unity_meta_paths.get(filename)
+        if not meta_path:
+            continue
+        try:
+            with open(meta_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except OSError:
+            continue
+
+        mode_match = re.search(r'spriteMode:\s*(\d+)', content)
+        mode = int(mode_match.group(1)) if mode_match else 1
+
+        new_content = content
+        if mode == 2:
+            for sprite_name, border in borders.items():
+                new_content = _set_sprite_entry_border(new_content, sprite_name, border)
+        else:
+            border = next(iter(borders.values()))
+            new_content = _set_sprite_border_field(new_content, border)
+            for sprite_name, b in borders.items():
+                new_content = _set_sprite_entry_border(new_content, sprite_name, b)
+
+        if new_content != content:
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            updated += 1
+
+    return updated
+
+
 def build_unity_guid_map(unity_textures_dir):
     """Map sprite filenames to Unity GUIDs by scanning .meta files."""
     guid_map = {}
@@ -96,7 +248,8 @@ def parse_prefab(path):
         return json.load(f)
 
 
-def convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid=None):
+def convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid=None,
+                   cocos_border_map=None):
     root_idx = None
     for i, item in enumerate(data):
         if isinstance(item, dict) and item.get("__type__") == "cc.Node":
@@ -131,6 +284,14 @@ def convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid=N
                 ]
                 if len(candidates) == 1:
                     return candidates[0]
+        return None
+
+    def get_sprite_border(comp_item):
+        sf = comp_item.get("_spriteFrame", {})
+        if isinstance(sf, dict) and "__uuid__" in sf:
+            border = (cocos_border_map or {}).get(sf["__uuid__"])
+            if border and any(v != 0 for v in border):
+                return border
         return None
 
     def assign_ids(node_idx, parent_trans_id=None):
@@ -204,11 +365,13 @@ def convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid=N
                 needs_canvas_renderer = True
                 sprite_guid = get_sprite_guid(citem)
                 sprite_frame = citem.get("_spriteFrame")
+                sprite_border = get_sprite_border(citem)
                 components.append({
                     "type": "Image",
                     "id": gid(),
                     "guid": sprite_guid,
                     "has_sprite_frame": isinstance(sprite_frame, dict) and "__uuid__" in sprite_frame,
+                    "sliced": sprite_border is not None,
                 })
             elif ctype == "cc.Label" or ctype == "cc.RichText":
                 needs_canvas_renderer = True
@@ -493,7 +656,13 @@ def convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid=N
                     lines.append("  m_Sprite: {fileID: 21300000, guid: " + c["guid"] + ", type: 3}")
                 else:
                     lines.append("  m_Sprite: {fileID: 0}")
-                lines.append("  m_Type: " + ("3" if node_idx in slider_fill_nodes else "0"))
+                if node_idx in slider_fill_nodes:
+                    image_type = "3"
+                elif c.get("sliced"):
+                    image_type = "1"
+                else:
+                    image_type = "0"
+                lines.append("  m_Type: " + image_type)
                 lines.append("  m_PreserveAspect: 0")
                 lines.append("  m_FillCenter: 1")
                 lines.append("  m_FillMethod: " + ("0" if node_idx in slider_fill_nodes else "4"))
@@ -910,23 +1079,31 @@ def find_script_guid(unity_scripts_dir, prefab_name):
 
 
 def convert_single(src_path, out_path, cocos_sprite_dir, unity_textures_dir,
-                   prefix_module=False, unity_scripts_dir=None):
+                   prefix_module=False, unity_scripts_dir=None, skip_borders=False):
     """Convert a single Cocos prefab to Unity prefab."""
     cocos_uuid_map = build_uuid_to_filename_map(cocos_sprite_dir, prefix_module)
+    cocos_border_map = build_uuid_to_border_map(cocos_sprite_dir)
     unity_guid_map = build_unity_guid_map(unity_textures_dir)
+    if not skip_borders:
+        write_sprite_borders(cocos_sprite_dir, unity_textures_dir, prefix_module)
     data = parse_prefab(src_path)
     prefab_name = os.path.splitext(os.path.basename(src_path))[0]
     script_guid = find_script_guid(unity_scripts_dir, prefab_name)
-    return convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid)
+    return convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map,
+                          script_guid, cocos_border_map)
 
 
 def convert_batch(cocos_prefab_dir, output_dir, cocos_sprite_dir, unity_textures_dir,
-                  pattern="*.prefab", prefix_module=False, unity_scripts_dir=None):
+                  pattern="*.prefab", prefix_module=False, unity_scripts_dir=None,
+                  skip_borders=False):
     """Batch convert all Cocos prefabs in a directory."""
     os.makedirs(output_dir, exist_ok=True)
 
     cocos_uuid_map = build_uuid_to_filename_map(cocos_sprite_dir, prefix_module)
+    cocos_border_map = build_uuid_to_border_map(cocos_sprite_dir)
     unity_guid_map = build_unity_guid_map(unity_textures_dir)
+    if not skip_borders:
+        write_sprite_borders(cocos_sprite_dir, unity_textures_dir, prefix_module)
 
     prefab_files = []
     for root, dirs, files in os.walk(cocos_prefab_dir):
@@ -941,7 +1118,8 @@ def convert_batch(cocos_prefab_dir, output_dir, cocos_sprite_dir, unity_textures
             prefab_name = os.path.splitext(os.path.basename(prefab_path))[0]
             out_path = os.path.join(output_dir, f"{prefab_name}.prefab")
             script_guid = find_script_guid(unity_scripts_dir, prefab_name)
-            if convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map, script_guid):
+            if convert_prefab(data, out_path, cocos_uuid_map, unity_guid_map,
+                              script_guid, cocos_border_map):
                 success += 1
                 print(f"  [OK] {prefab_name}")
             else:
@@ -967,18 +1145,20 @@ def main():
                         help="Resolve images renamed with their top-level module prefix")
     parser.add_argument("--unity-scripts",
                         help="Unity scripts directory used to attach a view class matching the prefab name")
+    parser.add_argument("--skip-borders", action="store_true",
+                        help="Do not write nine-slice sprite borders into Unity .meta files")
 
     args = parser.parse_args()
 
     if args.batch:
         convert_batch(args.input, args.output, args.cocos_sprites, args.unity_textures,
-                      prefix_module=args.prefix_module, unity_scripts_dir=args.unity_scripts)
+                      prefix_module=args.prefix_module, unity_scripts_dir=args.unity_scripts,
+                      skip_borders=args.skip_borders)
     else:
         convert_single(args.input, args.output, args.cocos_sprites, args.unity_textures,
-                       args.prefix_module, args.unity_scripts)
+                       args.prefix_module, args.unity_scripts, args.skip_borders)
         print(f"Converted: {args.output}")
 
 
 if __name__ == "__main__":
-    import fnmatch
     main()

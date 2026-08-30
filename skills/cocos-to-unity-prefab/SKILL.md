@@ -7,18 +7,17 @@ description: >
   - Mapping Cocos components (cc.Sprite, cc.Label, cc.Button, cc.Layout, cc.ScrollView, etc.) to Unity equivalents (Image, Text, Button, GridLayoutGroup, VerticalLayoutGroup, ScrollRect, etc.)
   - Resolving sprite references from Cocos UUID-based system to Unity GUID-based system via .meta file cross-referencing
   - Preserving node hierarchy, sibling order, and transform data during migration
+  - Preserving nine-slice sprite borders in the Unity sprite importer
   - Batch converting multiple Cocos prefabs to Unity prefabs
-  - Porting Cocos TS/JS game logic scripts to Unity C#
-  - Migrating Cocos event system (EventMgr) to Unity MessageManager
-  - Porting Cocos Model layer to C#
-  - Copying and organizing Cocos resources (sprites, audio, JSON configs) into Unity
 ---
 
 # Cocos to Unity Prefab Migration
 
 ## Overview
 
-Convert Cocos Creator prefabs (JSON) into Unity prefabs (YAML) while preserving node hierarchy, transform data, and component behavior. Also covers script migration, event system porting, model layer conversion, and resource migration.
+Convert Cocos Creator prefabs (JSON) into Unity prefabs (YAML) while preserving node hierarchy, transform data, and component behavior. Sprite references are resolved across `.meta` files, and nine-slice borders are carried into the Unity sprite importer.
+
+Script migration (TS/JS to C#, EventMgr to MessageManager, Model layer porting) is handled by the sibling skill `cocos-to-unity-script`.
 
 ## Component Mapping
 
@@ -49,7 +48,7 @@ Sprites are resolved in two steps:
 
 When copying image assets, also read each Cocos `subMetas` entry's `borderLeft`, `borderBottom`, `borderRight`, and `borderTop`. Preserve these values in the corresponding Unity Sprite importer metadata as `spriteBorder: {x: left, y: bottom, z: right, w: top}`. For Multiple-mode textures, write the border to the matching sprite entry rather than applying one border to the whole texture.
 
-The script `scripts/convert_prefabs.py` performs both lookups automatically.
+The script `scripts/convert_prefabs.py` performs both lookups and writes the nine-slice borders automatically. Pass `--skip-borders` to disable the border write.
 
 ## Key Migration Rules
 
@@ -67,33 +66,6 @@ The script `scripts/convert_prefabs.py` performs both lookups automatically.
 12. **Nine-Slice Images**: Preserve all four Cocos sprite border values during image migration. If any border is non-zero, the Unity Sprite importer must contain the mapped `spriteBorder`, and every generated `Image` that uses that sprite must be Sliced (`m_Type: 1`) unless it is a Slider FillRect, whose Filled type takes precedence.
 13. **GridLayoutGroup CellSize**: Derived from first child node's `_contentSize`.
 14. **Layout Type**: Cocos `layoutType=0` is NONE, `1` is HORIZONTAL, `2` is VERTICAL, `3` is GRID.
-
-## Script Migration
-
-See `references/script-migration.md` for detailed TS/JS to C# conversion patterns.
-
-Quick reference:
-
-| Cocos | Unity |
-|---|---|
-| `@ccclass` class | `MonoBehaviour` |
-| `onLoad()` | `Awake()` / `Start()` |
-| `update(dt)` | `Update()` (use `Time.deltaTime`) |
-| `cc.instantiate()` | `Instantiate(prefab)` |
-| `cc.find(path)` | `transform.Find(path)` |
-| `cc.tween()` | `DOTween` (`DG.Tweening`) |
-| `EventMgr.dispatch` | `MessageManager.Instance.SendMessage` |
-| `LocalStorageMgr` | `CustomPrefesUtil` |
-| `JSON.stringify/parse` | `JsonUtility.ToJson/FromJson` |
-
-## Event System Migration
-
-| Cocos (EventMgr) | Unity (MessageManager) |
-|---|---|
-| `EventMgr.dispatch("EVENT_NAME", data)` | `MessageManager.Instance.SendMessage("EVENT_NAME", data)` |
-| `EventMgr.addEventListener("EVENT", handler, context)` | `MessageManager.Instance.RegisterMessage("EVENT", handler)` |
-| `EventMgr.removeEventListener("EVENT", handler, context)` | `MessageManager.Instance.RemoveMessageListener("EVENT", handler)` |
-
 
 ## Usage
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cocos to Unity Script Migration"
+  short_description: "Migrate Cocos Creator TS/JS scripts to Unity C# with event system and model porting."
+  default_prompt: "Migrate Cocos Creator scripts to Unity C#."
