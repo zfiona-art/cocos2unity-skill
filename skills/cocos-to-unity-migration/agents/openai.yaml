@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cocos to Unity Prefab Migration"
+  short_description: "Migrate Cocos Creator prefabs to Unity prefabs with full component mapping."
+  default_prompt: "Migrate Cocos Creator prefabs to Unity prefabs."
