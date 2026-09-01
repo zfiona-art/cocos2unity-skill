@@ -1,5 +1,5 @@
 ---
-name: cocos-to-unity-script-migration
+name: cocos-to-unity-script
 description: >
   Migrate Cocos Creator TypeScript/JavaScript game-logic scripts to Unity C#.
   Use when:

@@ -1,5 +1,5 @@
 ---
-name: cocos-to-unity-prefab-migration
+name: cocos-to-unity-prefab
 description: >
   Migrate Cocos Creator prefab files (JSON format) to Unity prefab files (YAML format).
   Use when:
